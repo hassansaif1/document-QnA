@@ -1,53 +1,106 @@
 import streamlit as st
-from openai import OpenAI
+import os
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import FAISS
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.document_loaders import PyPDFLoader
+import google.generativeai as genai
 
-# Show title and description.
-st.title("📄 Document question answering")
-st.write(
-    "Upload a document below and ask a question about it – GPT will answer! "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-)
+# -----------------------
+# Streamlit UI
+# -----------------------
+st.set_page_config(page_title="PDF Q&A - Gemini", layout="wide")
+st.title("📘 Ask Questions from Your PDF using Gemini")
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+st.markdown("""
+This app lets you upload a PDF, processes it into vector embeddings, and lets you 
+ask questions from your document using **Google Gemini (`gemini-flash-lite-latest`)**.
+""")
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+# -----------------------
+# 1️⃣ API Key Input
+# -----------------------
+api_key = st.text_input("Enter your Google API Key:", type="password")
+if not api_key:
+    st.warning("Please enter your Google API key to continue.")
+    st.stop()
 
-    # Let the user upload a file via `st.file_uploader`.
-    uploaded_file = st.file_uploader(
-        "Upload a document (.txt or .md)", type=("txt", "md")
-    )
+# Configure Gemini with user API key
+try:
+    genai.configure(api_key=api_key)
+except Exception as e:
+    st.error(f"Failed to configure Gemini: {e}")
+    st.stop()
 
-    # Ask the user for a question via `st.text_area`.
-    question = st.text_area(
-        "Now ask a question about the document!",
-        placeholder="Can you give me a short summary?",
-        disabled=not uploaded_file,
-    )
+# -----------------------
+# 2️⃣ File Upload
+# -----------------------
+uploaded_file = st.file_uploader("Upload your PDF file", type=["pdf"])
+if uploaded_file is None:
+    st.info("Please upload a PDF to start.")
+    st.stop()
 
-    if uploaded_file and question:
+# Save the uploaded file temporarily
+temp_path = "uploaded_document.pdf"
+with open(temp_path, "wb") as f:
+    f.write(uploaded_file.read())
 
-        # Process the uploaded file and question.
-        document = uploaded_file.read().decode()
-        messages = [
-            {
-                "role": "user",
-                "content": f"Here's a document: {document} \n\n---\n\n {question}",
-            }
-        ]
+# -----------------------
+# 3️⃣ Load & Split Document
+# -----------------------
+try:
+    loader = PyPDFLoader(temp_path)
+    documents = loader.load()
+    st.success("✅ PDF loaded successfully!")
+except Exception as e:
+    st.error(f"Error loading PDF: {e}")
+    st.stop()
 
-        # Generate an answer using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=messages,
-            stream=True,
-        )
+# Split into chunks
+splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+texts = splitter.split_documents(documents)
+st.write(f"Document split into {len(texts)} chunks.")
 
-        # Stream the response to the app using `st.write_stream`.
-        st.write_stream(stream)
+# -----------------------
+# 4️⃣ Create Vector Store
+# -----------------------
+try:
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    vectorstore = FAISS.from_documents(texts, embeddings)
+    st.success("✅ FAISS index created successfully!")
+except Exception as e:
+    st.error(f"Error creating FAISS index: {e}")
+    st.stop()
+
+# -----------------------
+# 5️⃣ Question Answering
+# -----------------------
+st.subheader("Ask your question")
+user_query = st.text_input("Enter your question about the PDF:")
+
+if user_query:
+    try:
+        # Retrieve relevant chunks
+        docs = vectorstore.similarity_search(user_query, k=4)
+        context = "\n\n".join([d.page_content for d in docs])
+
+        # Prepare prompt for Gemini
+        prompt = f"""
+        You are a helpful assistant. Use the following context from the document to answer the question.
+        If the answer is not found, say "The answer is not available in the document."
+
+        Context:
+        {context}
+
+        Question: {user_query}
+        """
+
+        # Query Gemini
+        model = genai.GenerativeModel("gemini-flash-lite-latest")
+        response = model.generate_content(prompt)
+
+        # Display response
+        st.markdown("### 🧠 Answer:")
+        st.write(response.text)
+    except Exception as e:
+        st.error(f"An error occurred while generating the answer: {e}")
