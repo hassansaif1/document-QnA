@@ -1,6 +1,6 @@
 import streamlit as st
 import os
-!pip install sentence-transformers
+
 import google.generativeai as genai
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
